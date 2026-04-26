@@ -197,60 +197,67 @@ div[data-testid="stExpander"] {
 
 
 # ─────────────────────────────────────────────
-# CONFIGURATION — edit these once
+# CONFIGURATION — read from Streamlit secrets
 # ─────────────────────────────────────────────
-# These are read from Streamlit secrets (secrets.toml)
-# In secrets.toml:
-#   [onedrive]
-#   client_id     = "YOUR_CLIENT_ID"       # from Azure (free, no credit card for personal)
-#   client_secret = "YOUR_CLIENT_SECRET"
-#   tenant_id     = "consumers"            # for personal accounts always use "consumers"
-#   file_res_id   = "627132b3-3264-43df-bf65-f22824cdf67e"
-#   user_email    = "your@outlook.com"
 
 def get_config():
     try:
         return {
-            "client_id":     st.secrets["onedrive"]["client_id"],
-            "client_secret": st.secrets["onedrive"]["client_secret"],
-            "tenant_id":     st.secrets["onedrive"]["tenant_id"],
-            "file_res_id":   st.secrets["onedrive"]["file_res_id"],
-            "user_email":    st.secrets["onedrive"]["user_email"],
+            "client_id":   st.secrets["onedrive"]["client_id"],
+            "tenant_id":   st.secrets["onedrive"]["tenant_id"],
+            "file_res_id": st.secrets["onedrive"]["file_res_id"],
+            "user_email":  st.secrets["onedrive"]["user_email"],
         }
     except Exception:
-        # Fallback for local testing — fill these in locally
         return {
-            "client_id":     "YOUR_CLIENT_ID",
-            "client_secret": "YOUR_CLIENT_SECRET",
-            "tenant_id":     "consumers",
-            "file_res_id":   "627132b3-3264-43df-bf65-f22824cdf67e",
-            "user_email":    "YOUR_EMAIL@outlook.com",
+            "client_id":   "YOUR_CLIENT_ID",
+            "tenant_id":   "consumers",
+            "file_res_id": "627132b3-3264-43df-bf65-f22824cdf67e",
+            "user_email":  "YOUR_EMAIL@outlook.com",
         }
 
 
 # ─────────────────────────────────────────────
-# MICROSOFT GRAPH — AUTH & FILE ACCESS
+# MICROSOFT GRAPH — AUTH via Device Code Flow
 # ─────────────────────────────────────────────
 
-@st.cache_data(ttl=3000, show_spinner=False)
-def get_access_token(client_id, client_secret, tenant_id):
-    """Get OAuth2 token using client credentials flow."""
+SCOPES = ["Files.ReadWrite", "offline_access", "User.Read"]
+
+def get_msal_app(client_id, tenant_id):
     authority = f"https://login.microsoftonline.com/{tenant_id}"
-    app = msal.ConfidentialClientApplication(
-        client_id,
-        authority=authority,
-        client_credential=client_secret,
-    )
-    result = app.acquire_token_for_client(
-        scopes=["https://graph.microsoft.com/.default"]
-    )
+    return msal.PublicClientApplication(client_id, authority=authority)
+
+
+def try_silent_auth(client_id, tenant_id):
+    """Try to get token silently from cache."""
+    app = get_msal_app(client_id, tenant_id)
+    accounts = app.get_accounts()
+    if accounts:
+        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+        if result and "access_token" in result:
+            return result["access_token"]
+    return None
+
+
+def initiate_device_flow(client_id, tenant_id):
+    """Start device code flow and return the flow dict."""
+    app = get_msal_app(client_id, tenant_id)
+    flow = app.initiate_device_flow(scopes=SCOPES)
+    if "user_code" not in flow:
+        raise Exception("Failed to create device flow. Check your Client ID.")
+    return flow
+
+
+def complete_device_flow(client_id, tenant_id, flow):
+    """Complete device code flow and return access token."""
+    app = get_msal_app(client_id, tenant_id)
+    result = app.acquire_token_by_device_flow(flow)
     if "access_token" in result:
         return result["access_token"]
     raise Exception(f"Auth failed: {result.get('error_description', result.get('error', 'Unknown error'))}")
 
 
 def graph_get(token, url):
-    """Make a GET request to Microsoft Graph API."""
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
@@ -258,8 +265,6 @@ def graph_get(token, url):
 
 
 def download_workbook(token, file_res_id):
-    """Download the Excel file as bytes via Graph API."""
-    # Get file download URL using the item ID
     url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_res_id}/content"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
@@ -268,7 +273,6 @@ def download_workbook(token, file_res_id):
 
 
 def upload_workbook(token, file_res_id, workbook_bytes):
-    """Upload the modified Excel file back to OneDrive."""
     url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_res_id}/content"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -280,11 +284,10 @@ def upload_workbook(token, file_res_id, workbook_bytes):
 
 
 # ─────────────────────────────────────────────
-# RANK LOGIC — identical to Google Apps Script
+# RANK LOGIC
 # ─────────────────────────────────────────────
 
 def parse_rank(val):
-    """Convert any cell value to a rank number (1-100) or 'NA'."""
     if val is None:
         return "NA"
     s = str(val).strip().upper()
@@ -299,20 +302,18 @@ def parse_rank(val):
 
 
 def get_group(rank):
-    """Return decade group (1-10=G1, 11-20=G2, etc.)"""
     if rank == "NA":
         return None
     return math.ceil(rank / 10)
 
 
 def get_rank_status(p1, p2):
-    """Return 'up', 'down', 'same', or 'na'."""
     if p1 == "NA" and p2 == "NA":
         return "na"
     if p1 == "NA" and p2 != "NA":
-        return "up"      # newly appeared
+        return "up"
     if p1 != "NA" and p2 == "NA":
-        return "down"    # disappeared
+        return "down"
     g1 = get_group(p1)
     g2 = get_group(p2)
     if g1 == g2:
@@ -321,7 +322,6 @@ def get_rank_status(p1, p2):
 
 
 def calculate_metrics(keywords):
-    """Calculate all 6 metrics from a list of {prev, curr} dicts."""
     total = first_page = rank_up = rank_down = top5 = top3 = 0
     for kw in keywords:
         p1 = parse_rank(kw["prev"])
@@ -337,12 +337,12 @@ def calculate_metrics(keywords):
         if s == "up":   rank_up += 1
         if s == "down": rank_down += 1
     return {
-        "total":       total,
-        "first_page":  first_page,
-        "rank_up":     rank_up,
-        "rank_down":   rank_down,
-        "top5":        top5,
-        "top3":        top3,
+        "total":      total,
+        "first_page": first_page,
+        "rank_up":    rank_up,
+        "rank_down":  rank_down,
+        "top5":       top5,
+        "top3":       top3,
     }
 
 
@@ -358,7 +358,6 @@ MONTH_MAP = {
 }
 
 def parse_date_from_sheet_name(name):
-    """Extract date from sheet name like 'March 31st Rank Summary'."""
     lower = name.lower()
     month_num = None
     for m, n in sorted(MONTH_MAP.items(), key=lambda x: -len(x[0])):
@@ -381,25 +380,17 @@ def parse_date_from_sheet_name(name):
 
 
 def parse_cell_date(val):
-    """Parse a date from a cell value — handles Date objects, DD/MM/YYYY, etc."""
     if val is None or val == "":
         return None
-
-    # Already a date/datetime
     if isinstance(val, (date, datetime)):
         if isinstance(val, datetime):
             return val.date()
         return val
-
     s = str(val).strip()
     if not s:
         return None
-
-    # Handle multiline cells — take last line
     if "\n" in s:
         s = s.split("\n")[-1].strip()
-
-    # DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY
     m = re.match(r'^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$', s)
     if m:
         d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -409,16 +400,12 @@ def parse_cell_date(val):
                 return date(y, mo, d)
             except ValueError:
                 pass
-
-    # YYYY-MM-DD (ISO)
     m = re.match(r'^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})$', s)
     if m:
         try:
             return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         except ValueError:
             pass
-
-    # "30 Mar 2026" or "30 March 2026"
     m = re.match(r'(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})', s)
     if m:
         mon = MONTH_MAP.get(m.group(2).lower())
@@ -427,8 +414,6 @@ def parse_cell_date(val):
                 return date(int(m.group(3)), mon, int(m.group(1)))
             except ValueError:
                 pass
-
-    # "Mar 30, 2026"
     m = re.match(r'([a-zA-Z]+)\s+(\d{1,2})[,\s]+(\d{4})', s)
     if m:
         mon = MONTH_MAP.get(m.group(1).lower())
@@ -437,24 +422,10 @@ def parse_cell_date(val):
                 return date(int(m.group(3)), mon, int(m.group(2)))
             except ValueError:
                 pass
-
     return None
 
 
-def find_header_row_index(sheet):
-    """Find the row index (0-based) that contains the most parseable dates."""
-    best_idx = -1
-    best_count = 0
-    for r_idx, row in enumerate(sheet.iter_rows(min_row=1, max_row=3, values_only=True)):
-        count = sum(1 for cell in row if parse_cell_date(cell))
-        if count > best_count:
-            best_count = count
-            best_idx = r_idx
-    return best_idx if best_count > 0 else -1
-
-
 def find_closest_date_col(date_cols, target_date, tolerance_days=10):
-    """Find column whose date is closest to target_date within tolerance."""
     best = None
     best_diff = float("inf")
     for dc in date_cols:
@@ -466,7 +437,6 @@ def find_closest_date_col(date_cols, target_date, tolerance_days=10):
 
 
 def find_previous_month_end_col(date_cols, current_date):
-    """Find closest month-end (day >= 25) strictly before current_date."""
     best = None
     best_date = None
     for dc in date_cols:
@@ -483,28 +453,17 @@ def find_previous_month_end_col(date_cols, current_date):
 # ─────────────────────────────────────────────
 
 def extract_sheet_name_from_hyperlink(cell):
-    """
-    Extract sheet name from Excel HYPERLINK formula or hyperlink object.
-    Formula: =HYPERLINK("#SheetName!A1","Display Name")
-    OR the cell value may just be the display name and we match by name.
-    """
-    # Try to get hyperlink from cell
     if hasattr(cell, 'hyperlink') and cell.hyperlink:
         target = cell.hyperlink.target or ""
-        # Internal link format: #SheetName!A1
         if target.startswith("#"):
-            ref = target[1:]  # remove #
+            ref = target[1:]
             if "!" in ref:
                 return ref.split("!")[0].strip("'")
             return ref.strip("'")
-
-    # Try formula in cell value
     val = str(cell.value or "")
     m = re.search(r'HYPERLINK\s*\(\s*["\']#([^"\'!]+)', val, re.IGNORECASE)
     if m:
         return m.group(1).strip("'").strip()
-
-    # Fallback: cell display value = sheet name
     return str(cell.value).strip() if cell.value else None
 
 
@@ -513,7 +472,6 @@ def extract_sheet_name_from_hyperlink(cell):
 # ─────────────────────────────────────────────
 
 def get_rank_summary_sheets(wb):
-    """Return list of sheet names that look like Rank Summary sheets."""
     results = []
     for name in wb.sheetnames:
         if re.search(r'rank\s*summary', name, re.IGNORECASE):
@@ -522,17 +480,10 @@ def get_rank_summary_sheets(wb):
 
 
 def process_project_sheet(proj_sheet, current_date):
-    """
-    Read a project sheet, find the two date columns,
-    calculate and return the 6 metrics.
-    Returns dict with metrics or {'error': 'message'}.
-    """
-    # Read all values
     all_rows = list(proj_sheet.iter_rows(values_only=True))
     if len(all_rows) < 2:
         return {"error": "Sheet is empty or has too few rows"}
 
-    # Find header row
     best_idx = -1
     best_count = 0
     for r_idx, row in enumerate(all_rows[:3]):
@@ -545,8 +496,6 @@ def process_project_sheet(proj_sheet, current_date):
         return {"error": "No date columns found in header row"}
 
     header_row = all_rows[best_idx]
-
-    # Parse all date columns from header
     date_cols = []
     for c_idx, cell_val in enumerate(header_row):
         d = parse_cell_date(cell_val)
@@ -556,7 +505,6 @@ def process_project_sheet(proj_sheet, current_date):
     if not date_cols:
         return {"error": "No parseable dates found in header"}
 
-    # Find current and previous columns
     curr_col = find_closest_date_col(date_cols, current_date)
     if not curr_col:
         return {"error": f"No column found matching date ~{current_date.strftime('%d/%m/%Y')}"}
@@ -565,12 +513,9 @@ def process_project_sheet(proj_sheet, current_date):
     if not prev_col:
         return {"error": f"No previous month-end column found before {curr_col['date'].strftime('%d/%m/%Y')}"}
 
-    # Read keyword rows — all rows after header
     keywords = []
     for r_idx in range(best_idx + 1, len(all_rows)):
         row = all_rows[r_idx]
-
-        # Column A = SL No — must be a number to be a keyword row
         sl_val = row[0] if len(row) > 0 else None
         if sl_val is None or str(sl_val).strip() == "":
             continue
@@ -578,15 +523,11 @@ def process_project_sheet(proj_sheet, current_date):
             int(float(str(sl_val).strip()))
         except (ValueError, TypeError):
             continue
-
-        # Column B = keyword — must not be empty
         kw_val = row[1] if len(row) > 1 else None
         if not kw_val or str(kw_val).strip() == "":
             continue
-
         prev_val = row[prev_col["col_idx"]] if prev_col["col_idx"] < len(row) else None
         curr_val = row[curr_col["col_idx"]] if curr_col["col_idx"] < len(row) else None
-
         keywords.append({"prev": prev_val, "curr": curr_val})
 
     if not keywords:
@@ -599,23 +540,13 @@ def process_project_sheet(proj_sheet, current_date):
 
 
 def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
-    """
-    Main processing function.
-    Reads the summary sheet, processes each project, writes results back.
-    Returns (success_count, error_count, error_details, totals).
-    """
     summary_sheet = wb[summary_sheet_name]
-
-    # Parse current date from sheet name
     current_date = parse_date_from_sheet_name(summary_sheet_name)
     if not current_date:
         return 0, 0, [f"Could not parse date from sheet name: '{summary_sheet_name}'"], {}
 
-    # Build sheet lookup by name
     sheet_by_name = {s.lower(): wb[s] for s in wb.sheetnames}
-
-    # Read all rows from summary sheet
-    all_rows = list(summary_sheet.iter_rows(min_row=2))  # skip header row 1
+    all_rows = list(summary_sheet.iter_rows(min_row=2))
 
     success_count = 0
     error_count   = 0
@@ -624,7 +555,7 @@ def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
 
     project_rows = []
     for row in all_rows:
-        cell_b = row[1] if len(row) > 1 else None  # Column B
+        cell_b = row[1] if len(row) > 1 else None
         if cell_b is None or cell_b.value is None:
             continue
         project_rows.append(row)
@@ -632,21 +563,16 @@ def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
     total_projects = len(project_rows)
 
     for idx, row in enumerate(project_rows):
-        cell_b = row[1]  # Column B — project name / hyperlink
-
-        # Get project sheet name from hyperlink or cell value
+        cell_b = row[1]
         proj_sheet_name = extract_sheet_name_from_hyperlink(cell_b)
         display_name    = str(cell_b.value).strip() if cell_b.value else f"Row {row[0].row}"
 
         if progress_callback:
             progress_callback(idx, total_projects, display_name)
 
-        # Find the project sheet
         proj_sheet = None
         if proj_sheet_name:
             proj_sheet = sheet_by_name.get(proj_sheet_name.lower())
-
-        # Fallback: try matching display name
         if not proj_sheet and display_name:
             proj_sheet = sheet_by_name.get(display_name.lower())
 
@@ -657,7 +583,6 @@ def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
             error_details.append(f"Row {row[0].row} — {display_name}: {error_msg}")
             continue
 
-        # Process the project sheet
         result = process_project_sheet(proj_sheet, current_date)
 
         if "error" in result and result["error"]:
@@ -665,16 +590,13 @@ def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
             error_count += 1
             error_details.append(f"Row {row[0].row} — {display_name}: {result['error']}")
         else:
-            # Write metrics to columns D(4), E(5), F(6), G(7), H(8), I(9)
-            row[3].value = result["total"]       # D
-            row[4].value = result["first_page"]  # E
-            row[5].value = result["rank_up"]     # F
-            row[6].value = result["rank_down"]   # G
-            row[7].value = result["top5"]        # H
-            row[8].value = result["top3"]        # I
+            row[3].value = result["total"]
+            row[4].value = result["first_page"]
+            row[5].value = result["rank_up"]
+            row[6].value = result["rank_down"]
+            row[7].value = result["top5"]
+            row[8].value = result["top3"]
             success_count += 1
-
-            # Accumulate totals
             for k in totals:
                 totals[k] += result.get(k, 0)
 
@@ -682,8 +604,7 @@ def refresh_summary_sheet(wb, summary_sheet_name, progress_callback=None):
 
 
 def _write_error_row(summary_sheet, row):
-    """Write 'Error' to all 6 metric cells for a failed project row."""
-    for col_offset in range(3, 9):  # D=3, E=4, F=5, G=6, H=7, I=8 (0-indexed)
+    for col_offset in range(3, 9):
         if col_offset < len(row):
             row[col_offset].value = "Error"
 
@@ -693,7 +614,6 @@ def _write_error_row(summary_sheet, row):
 # ─────────────────────────────────────────────
 
 def main():
-    # Header
     st.markdown("""
     <div class="app-header">
         <div class="header-icon">📊</div>
@@ -706,47 +626,79 @@ def main():
 
     config = get_config()
 
+    # Init session state
+    for k in ["workbook_bytes","workbook","token","sheets_list","connected","device_flow"]:
+        if k not in st.session_state:
+            st.session_state[k] = None
+    if "connected" not in st.session_state:
+        st.session_state.connected = False
+
     # ── Step 1: Connect & Load File ──────────────────────────
     st.markdown('<div class="card"><div class="card-title">Step 1 — Connect to OneDrive</div>', unsafe_allow_html=True)
 
-    if "workbook_bytes" not in st.session_state:
-        st.session_state.workbook_bytes = None
-        st.session_state.workbook       = None
-        st.session_state.token          = None
-        st.session_state.sheets_list    = []
-        st.session_state.connected      = False
-
     if not st.session_state.connected:
-        if st.button("🔗 Connect to OneDrive & Load File"):
-            with st.spinner("Connecting to OneDrive…"):
-                try:
-                    token = get_access_token(
-                        config["client_id"],
-                        config["client_secret"],
-                        config["tenant_id"]
-                    )
-                    st.session_state.token = token
 
-                    wb_bytes = download_workbook(token, config["file_res_id"])
-                    st.session_state.workbook_bytes = wb_bytes.getvalue()
+        # Stage 1: Initiate device flow
+        if st.session_state.device_flow is None:
+            if st.button("🔗 Connect to OneDrive & Load File"):
+                with st.spinner("Initiating login…"):
+                    try:
+                        flow = initiate_device_flow(config["client_id"], config["tenant_id"])
+                        st.session_state.device_flow = flow
+                        st.rerun()
+                    except Exception as e:
+                        st.markdown(f"""
+                        <div class="status-box status-error">
+                            ❌ Failed to initiate login: {str(e)}
+                        </div>""", unsafe_allow_html=True)
 
-                    wb = openpyxl.load_workbook(BytesIO(st.session_state.workbook_bytes))
-                    st.session_state.workbook    = wb
-                    st.session_state.sheets_list = get_rank_summary_sheets(wb)
-                    st.session_state.connected   = True
+        # Stage 2: Show device code and wait for user to authenticate
+        else:
+            flow = st.session_state.device_flow
+            user_code = flow.get("user_code", "")
+            st.markdown(f"""
+            <div class="status-box status-info">
+                🔑 <strong>Action required:</strong><br><br>
+                1. Open <strong>https://microsoft.com/devicelogin</strong> in a new tab<br>
+                2. Enter code: <strong style="font-size:20px;letter-spacing:3px;">{user_code}</strong><br>
+                3. Sign in with <strong>choresuk@outlook.com</strong><br>
+                4. Come back here and click the button below
+            </div>""", unsafe_allow_html=True)
 
-                    st.markdown(f"""
-                    <div class="status-box status-ok">
-                        ✅ Connected! Found <strong>{len(wb.sheetnames)}</strong> sheets,
-                        <strong>{len(st.session_state.sheets_list)}</strong> Rank Summary sheet(s).
-                    </div>""", unsafe_allow_html=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ I've signed in — Load File"):
+                    with st.spinner("Verifying login and loading file…"):
+                        try:
+                            token = complete_device_flow(
+                                config["client_id"],
+                                config["tenant_id"],
+                                flow
+                            )
+                            st.session_state.token = token
 
-                except Exception as e:
-                    st.markdown(f"""
-                    <div class="status-box status-error">
-                        ❌ Connection failed: {str(e)}<br>
-                        Please check your secrets configuration.
-                    </div>""", unsafe_allow_html=True)
+                            wb_bytes = download_workbook(token, config["file_res_id"])
+                            st.session_state.workbook_bytes = wb_bytes.getvalue()
+
+                            wb = openpyxl.load_workbook(BytesIO(st.session_state.workbook_bytes))
+                            st.session_state.workbook    = wb
+                            st.session_state.sheets_list = get_rank_summary_sheets(wb)
+                            st.session_state.connected   = True
+                            st.session_state.device_flow = None
+                            st.rerun()
+
+                        except Exception as e:
+                            st.markdown(f"""
+                            <div class="status-box status-error">
+                                ❌ Connection failed: {str(e)}<br>
+                                Please check your secrets configuration.
+                            </div>""", unsafe_allow_html=True)
+
+            with col2:
+                if st.button("🔄 Start Over"):
+                    st.session_state.device_flow = None
+                    st.rerun()
+
     else:
         wb = st.session_state.workbook
         st.markdown(f"""
@@ -756,8 +708,9 @@ def main():
         </div>""", unsafe_allow_html=True)
 
         if st.button("🔄 Reconnect / Reload File"):
-            for k in ["workbook_bytes","workbook","token","sheets_list","connected"]:
-                if k in st.session_state: del st.session_state[k]
+            for k in ["workbook_bytes","workbook","token","sheets_list","connected","device_flow"]:
+                st.session_state[k] = None
+            st.session_state.connected = False
             st.rerun()
 
     st.markdown('</div>', unsafe_allow_html=True)
@@ -772,10 +725,8 @@ def main():
             label_visibility="collapsed"
         )
 
-        # Show detected date
         detected_date = parse_date_from_sheet_name(selected_sheet)
         if detected_date:
-            # Count project rows
             wb = st.session_state.workbook
             summary_ws = wb[selected_sheet]
             project_count = sum(
@@ -828,12 +779,10 @@ def main():
                         status_text.empty()
                         log_container.empty()
 
-                        # Save workbook back to bytes
                         out = BytesIO()
                         wb.save(out)
                         updated_bytes = out.getvalue()
 
-                        # Upload back to OneDrive
                         status_text.markdown(
                             '<div class="status-box status-info">☁️ Uploading to OneDrive…</div>',
                             unsafe_allow_html=True
@@ -845,11 +794,9 @@ def main():
                         )
                         status_text.empty()
 
-                        # Update session state
                         st.session_state.workbook_bytes = updated_bytes
                         st.session_state.workbook = openpyxl.load_workbook(BytesIO(updated_bytes))
 
-                        # Success summary
                         total_projects = success + errors
                         st.markdown(f"""
                         <div class="status-box status-ok">
@@ -857,7 +804,6 @@ def main():
                             {f'<br>⚠️ {errors} project(s) had errors — check details below.' if errors > 0 else ''}
                         </div>""", unsafe_allow_html=True)
 
-                        # Metrics summary
                         if success > 0:
                             st.markdown("""
                             <div class="card">
@@ -885,7 +831,6 @@ def main():
 
                             st.markdown('</div></div>', unsafe_allow_html=True)
 
-                        # Error details
                         if error_details:
                             with st.expander(f"⚠️ {errors} Error(s) — click to expand"):
                                 for ed in error_details:
