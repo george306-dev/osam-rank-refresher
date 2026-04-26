@@ -638,13 +638,14 @@ def main():
 
     if not st.session_state.connected:
 
-        # Stage 1: Initiate device flow
+        # Stage 1: Initiate device flow — only once
         if st.session_state.device_flow is None:
             if st.button("🔗 Connect to OneDrive & Load File"):
                 with st.spinner("Initiating login…"):
                     try:
                         flow = initiate_device_flow(config["client_id"], config["tenant_id"])
                         st.session_state.device_flow = flow
+                        st.session_state.flow_user_code = flow.get("user_code", "")
                         st.rerun()
                     except Exception as e:
                         st.markdown(f"""
@@ -652,24 +653,26 @@ def main():
                             ❌ Failed to initiate login: {str(e)}
                         </div>""", unsafe_allow_html=True)
 
-        # Stage 2: Show device code and wait for user to authenticate
+        # Stage 2: Show stored code — never regenerate
         else:
-            flow = st.session_state.device_flow
-            user_code = flow.get("user_code", "")
+            user_code = st.session_state.get("flow_user_code", "")
             st.markdown(f"""
             <div class="status-box status-info">
                 🔑 <strong>Action required:</strong><br><br>
-                1. Open <strong>https://microsoft.com/devicelogin</strong> in a new tab<br>
-                2. Enter code: <strong style="font-size:20px;letter-spacing:3px;">{user_code}</strong><br>
+                1. Open <a href="https://microsoft.com/devicelogin" target="_blank"><strong>https://microsoft.com/devicelogin</strong></a> in a NEW tab<br>
+                2. Enter this code exactly: <strong style="font-size:24px;letter-spacing:4px;font-family:monospace;background:#0f1117;padding:4px 8px;border-radius:4px;">{user_code}</strong><br>
                 3. Sign in with <strong>choresuk@outlook.com</strong><br>
-                4. Come back here and click the button below
+                4. After you see "You have signed in" page, come back and click below
             </div>""", unsafe_allow_html=True)
+
+            st.warning("⚠️ Do NOT refresh this page — the code will change and stop working.")
 
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ I've signed in — Load File"):
                     with st.spinner("Verifying login and loading file…"):
                         try:
+                            flow = st.session_state.device_flow
                             token = complete_device_flow(
                                 config["client_id"],
                                 config["tenant_id"],
@@ -685,18 +688,20 @@ def main():
                             st.session_state.sheets_list = get_rank_summary_sheets(wb)
                             st.session_state.connected   = True
                             st.session_state.device_flow = None
+                            st.session_state.flow_user_code = None
                             st.rerun()
 
                         except Exception as e:
                             st.markdown(f"""
                             <div class="status-box status-error">
                                 ❌ Connection failed: {str(e)}<br>
-                                Please check your secrets configuration.
+                                If the code expired, click "Get New Code" to start again.
                             </div>""", unsafe_allow_html=True)
 
             with col2:
-                if st.button("🔄 Start Over"):
+                if st.button("🔄 Get New Code"):
                     st.session_state.device_flow = None
+                    st.session_state.flow_user_code = None
                     st.rerun()
 
     else:
