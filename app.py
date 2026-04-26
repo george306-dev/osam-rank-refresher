@@ -75,7 +75,7 @@ def find_file_id(token, file_res_id):
 
     # Method 2: Try via shares (using the share URL)
     import base64
-    share_url = "https://1drv.ms/x/c/8307a200a1482ea2/IQCzMnFiZDLfQ79l8igkzfZ-AbBqXob9xPEArgjD1akGydA?e=gbp0uZ"
+    share_url = "https://1drv.ms/x/c/f754eedfd662ac76/IQBf4DbfaWF-SJSqxppjO-rxASQkZP7u4PvPoVutrNOQgbI?e=E50wiO"
     encoded = base64.b64encode(share_url.encode()).decode().rstrip("=").replace("/","_").replace("+","-")
     url = f"https://graph.microsoft.com/v1.0/shares/u!{encoded}/driveItem"
     resp = requests.get(url, headers=headers, timeout=30)
@@ -363,6 +363,22 @@ def main():
                     st.rerun()
                 except Exception as e:
                     st.markdown(f'<div class="status-box status-error">❌ Failed: {str(e)}</div>', unsafe_allow_html=True)
+
+        if st.button("🔍 Debug: List My OneDrive Files"):
+            with st.spinner("Listing files…"):
+                headers = {"Authorization": f"Bearer {token}"}
+                # Check who we are
+                me = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers).json()
+                st.write(f"Logged in as: {me.get('userPrincipalName', me.get('mail', 'unknown'))}")
+                # List root files
+                resp = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/children", headers=headers)
+                st.write(f"Drive status: {resp.status_code}")
+                if resp.status_code == 200:
+                    items = resp.json().get("value", [])
+                    for item in items:
+                        st.write(f"📄 {item['name']} — ID: {item['id']}")
+                else:
+                    st.write(resp.json())
     else:
         wb = st.session_state.workbook
         st.markdown(f"""
