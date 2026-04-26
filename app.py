@@ -800,7 +800,7 @@ def main():
         st.markdown('<div class="card"><div class="card-title">Step 3 — Refresh</div>', unsafe_allow_html=True)
 
         if detected_date:
-            if st.button(f"🚀 Refresh  "{selected_sheet}""):
+            if st.button(f"🚀 Refresh '{selected_sheet}'"):
                 wb = openpyxl.load_workbook(BytesIO(st.session_state.workbook_bytes))
 
                 progress_bar  = st.progress(0)
