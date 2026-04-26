@@ -1,10 +1,9 @@
 """
-OSAM SEO Rank Refresher — Username/Password Auth
+OSAM SEO Rank Refresher — Refresh Token Auth
 """
 
 import streamlit as st
 import requests
-import msal
 import math
 import re
 from datetime import date, datetime
@@ -39,30 +38,29 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 def get_config():
     try:
         return {
-            "client_id":   st.secrets["onedrive"]["client_id"],
-            "tenant_id":   st.secrets["onedrive"]["tenant_id"],
-            "file_res_id": st.secrets["onedrive"]["file_res_id"],
+            "client_id":     st.secrets["onedrive"]["client_id"],
+            "tenant_id":     st.secrets["onedrive"]["tenant_id"],
+            "file_res_id":   st.secrets["onedrive"]["file_res_id"],
+            "refresh_token": st.secrets["onedrive"]["refresh_token"],
         }
-    except Exception:
-        return {"client_id": "YOUR_CLIENT_ID", "tenant_id": "consumers", "file_res_id": ""}
+    except Exception as e:
+        raise Exception(f"Missing secrets: {e}")
 
 
-def get_token_with_password(client_id, tenant_id, username, password):
-    """ROPC flow — works for personal Microsoft accounts."""
+def get_access_token(client_id, tenant_id, refresh_token):
+    """Exchange refresh token for access token — no user interaction needed."""
     url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     data = {
-        "client_id":  client_id,
-        "scope":      "https://graph.microsoft.com/Files.ReadWrite https://graph.microsoft.com/User.Read offline_access",
-        "username":   username,
-        "password":   password,
-        "grant_type": "password",
+        "client_id":     client_id,
+        "grant_type":    "refresh_token",
+        "refresh_token": refresh_token,
+        "scope":         "https://graph.microsoft.com/Files.ReadWrite https://graph.microsoft.com/User.Read offline_access",
     }
     resp = requests.post(url, data=data, timeout=30)
     result = resp.json()
     if "access_token" in result:
         return result["access_token"]
-    error = result.get("error_description") or result.get("error") or str(result)
-    raise Exception(error)
+    raise Exception(result.get("error_description") or result.get("error") or str(result))
 
 
 def download_workbook(token, file_res_id):
@@ -295,63 +293,51 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    config = get_config()
+    # Load config & get token silently
+    try:
+        config = get_config()
+        token  = get_access_token(
+            config["client_id"],
+            config["tenant_id"],
+            config["refresh_token"]
+        )
+    except Exception as e:
+        st.markdown(f'<div class="status-box status-error">❌ Auth error: {str(e)}</div>', unsafe_allow_html=True)
+        return
 
-    for k in ["workbook_bytes","workbook","token","sheets_list","connected"]:
+    for k in ["workbook_bytes","workbook","sheets_list","connected"]:
         if k not in st.session_state:
             st.session_state[k] = None
     if "connected" not in st.session_state:
         st.session_state.connected = False
 
-    # ── Step 1: Login ─────────────────────────────────────────
-    st.markdown('<div class="card"><div class="card-title">Step 1 — Sign in to OneDrive</div>', unsafe_allow_html=True)
+    # ── Step 1: Load File ─────────────────────────────────────
+    st.markdown('<div class="card"><div class="card-title">Step 1 — Load File from OneDrive</div>', unsafe_allow_html=True)
 
     if not st.session_state.connected:
-        st.markdown("""
-        <div class="status-box status-info">
-            Enter your Microsoft account credentials to connect to OneDrive.
-            Your password is only used to get an access token and is never stored.
-        </div>""", unsafe_allow_html=True)
+        st.markdown('<div class="status-box status-info">📂 Click below to load your Excel file from OneDrive.</div>', unsafe_allow_html=True)
 
-        username = st.text_input("Microsoft Account Email", value="choresuk@outlook.com")
-        password = st.text_input("Password", type="password")
-
-        if st.button("🔗 Connect to OneDrive & Load File"):
-            if not password:
-                st.error("Please enter your password.")
-            else:
-                with st.spinner("Signing in…"):
-                    try:
-                        token = get_token_with_password(
-                            config["client_id"],
-                            config["tenant_id"],
-                            username,
-                            password
-                        )
-                        st.session_state.token = token
-
-                        wb_bytes = download_workbook(token, config["file_res_id"])
-                        st.session_state.workbook_bytes = wb_bytes.getvalue()
-                        wb = openpyxl.load_workbook(BytesIO(st.session_state.workbook_bytes))
-                        st.session_state.workbook    = wb
-                        st.session_state.sheets_list = get_rank_summary_sheets(wb)
-                        st.session_state.connected   = True
-                        st.rerun()
-
-                    except Exception as e:
-                        st.markdown(f"""
-                        <div class="status-box status-error">
-                            ❌ Sign-in failed: {str(e)}
-                        </div>""", unsafe_allow_html=True)
+        if st.button("📂 Load File from OneDrive"):
+            with st.spinner("Loading file…"):
+                try:
+                    wb_bytes = download_workbook(token, config["file_res_id"])
+                    st.session_state.workbook_bytes = wb_bytes.getvalue()
+                    wb = openpyxl.load_workbook(BytesIO(st.session_state.workbook_bytes))
+                    st.session_state.workbook    = wb
+                    st.session_state.sheets_list = get_rank_summary_sheets(wb)
+                    st.session_state.connected   = True
+                    st.rerun()
+                except Exception as e:
+                    st.markdown(f'<div class="status-box status-error">❌ Failed: {str(e)}</div>', unsafe_allow_html=True)
     else:
         wb = st.session_state.workbook
         st.markdown(f"""
         <div class="status-box status-ok">
-            ✅ Connected · <strong>{len(wb.sheetnames)}</strong> sheets loaded ·
+            ✅ File loaded · <strong>{len(wb.sheetnames)}</strong> sheets ·
             {len(st.session_state.sheets_list)} Rank Summary sheet(s) found
         </div>""", unsafe_allow_html=True)
-        if st.button("🔄 Reconnect / Reload File"):
-            for k in ["workbook_bytes","workbook","token","sheets_list"]:
+        if st.button("🔄 Reload File"):
+            for k in ["workbook_bytes","workbook","sheets_list"]:
                 st.session_state[k] = None
             st.session_state.connected = False
             st.rerun()
@@ -405,7 +391,7 @@ def main():
                         updated_bytes = out.getvalue()
 
                         status_text.markdown('<div class="status-box status-info">☁️ Uploading to OneDrive…</div>', unsafe_allow_html=True)
-                        upload_workbook(st.session_state.token, config["file_res_id"], updated_bytes)
+                        upload_workbook(token, config["file_res_id"], updated_bytes)
                         status_text.empty()
 
                         st.session_state.workbook_bytes = updated_bytes
@@ -414,7 +400,7 @@ def main():
                         total_projects = success + errors
                         st.markdown(f"""
                         <div class="status-box status-ok">
-                            ✅ Done! <strong>{success}/{total_projects}</strong> projects updated.
+                            ✅ Done! <strong>{success}/{total_projects}</strong> projects updated successfully.
                             {f'<br>⚠️ {errors} had errors.' if errors > 0 else ''}
                         </div>""", unsafe_allow_html=True)
 
