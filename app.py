@@ -63,11 +63,45 @@ def get_access_token(client_id, tenant_id, refresh_token):
     raise Exception(result.get("error_description") or result.get("error") or str(result))
 
 
+def find_file_id(token, file_res_id):
+    """Try multiple methods to find the correct Graph API file ID."""
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    # Method 1: Try direct item ID
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_res_id}"
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        return file_res_id
+
+    # Method 2: Try via shares (using the share URL)
+    import base64
+    share_url = "https://1drv.ms/x/c/8307a200a1482ea2/IQCzMnFiZDLfQ79l8igkzfZ-AbBqXob9xPEArgjD1akGydA?e=gbp0uZ"
+    encoded = base64.b64encode(share_url.encode()).decode().rstrip("=").replace("/","_").replace("+","-")
+    url = f"https://graph.microsoft.com/v1.0/shares/u!{encoded}/driveItem"
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        return resp.json()["id"]
+
+    # Method 3: Search for Excel files
+    url = "https://graph.microsoft.com/v1.0/me/drive/root/search(q='xlsx')"
+    resp = requests.get(url, headers=headers, timeout=30)
+    if resp.status_code == 200:
+        items = resp.json().get("value", [])
+        if items:
+            # Return first xlsx file found
+            return items[0]["id"]
+
+    raise Exception(f"Could not find file. Status: {resp.status_code} - {resp.text}")
+
 def download_workbook(token, file_res_id):
-    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_res_id}/content"
+    real_id = find_file_id(token, file_res_id)
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{real_id}/content"
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=60, allow_redirects=True)
     resp.raise_for_status()
+    # Store the real ID for upload
+    import streamlit as st
+    st.session_state["real_file_id"] = real_id
     return BytesIO(resp.content)
 
 
@@ -391,7 +425,8 @@ def main():
                         updated_bytes = out.getvalue()
 
                         status_text.markdown('<div class="status-box status-info">☁️ Uploading to OneDrive…</div>', unsafe_allow_html=True)
-                        upload_workbook(token, config["file_res_id"], updated_bytes)
+                        real_id = st.session_state.get("real_file_id", config["file_res_id"])
+                        upload_workbook(token, real_id, updated_bytes)
                         status_text.empty()
 
                         st.session_state.workbook_bytes = updated_bytes
