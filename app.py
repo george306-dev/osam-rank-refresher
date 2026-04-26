@@ -221,7 +221,7 @@ def get_config():
 # MICROSOFT GRAPH — AUTH via Device Code Flow
 # ─────────────────────────────────────────────
 
-SCOPES = ["Files.ReadWrite", "offline_access", "User.Read"]
+SCOPES = ["Files.ReadWrite", "User.Read"]
 
 def get_msal_app(client_id, tenant_id):
     authority = f"https://login.microsoftonline.com/{tenant_id}"
