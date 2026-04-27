@@ -137,10 +137,15 @@ def get_rank_status(p1, p2):
     return "up" if p2 < p1 else "down"
 
 def calculate_metrics(keywords):
+    # NOTE: NA keywords (including NA in both months) ARE counted in the total.
+    # A keyword tracked by the project is a keyword the project is tracking,
+    # regardless of whether it currently ranks in the top 100.
+    # Only first_page / top5 / top3 exclude NA — because an NA keyword
+    # genuinely isn't on page 1 / top 5 / top 3.
     total = first_page = rank_up = rank_down = top5 = top3 = 0
     for kw in keywords:
         p1, p2 = parse_rank(kw["prev"]), parse_rank(kw["curr"])
-        if p1 == "NA" and p2 == "NA": continue
+        # Every keyword counts toward total — including NA/NA
         total += 1
         if p2 != "NA":
             if p2 <= 10: first_page += 1
