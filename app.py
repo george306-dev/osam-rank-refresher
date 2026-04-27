@@ -117,10 +117,20 @@ def upload_workbook(token, file_res_id, workbook_bytes):
 
 # ── Rank logic ───────────────────────────────────────────────────────────────
 
+def is_blank_cell(val):
+    """A cell is 'blank' (= keyword not tracked this period) only if truly empty.
+    Dashes and 'NA' are NOT blank — they represent conscious entries by the team."""
+    if val is None:
+        return True
+    s = str(val).strip()
+    return s == ""
+
 def parse_rank(val):
     if val is None: return "NA"
     s = str(val).strip().upper()
-    if s in ("", "NA", "NULL"): return "NA"
+    # Dashes (hyphen, double-hyphen, em-dash, en-dash) are treated as NA — team
+    # uses these interchangeably with "NA" to mean "checked, not in top 100".
+    if s in ("", "NA", "NULL", "-", "--", "—", "–"): return "NA"
     if not re.match(r'^\d+$', s): return "NA"
     n = int(s)
     return n if 1 <= n <= 100 else "NA"
@@ -261,6 +271,8 @@ def process_project_sheet(proj_sheet, current_date):
     prev_col = find_previous_month_end_col(date_cols, curr_col["date"])
     if not prev_col: return {"error": "No previous month-end column"}
     keywords = []
+    curr_idx = curr_col["col_idx"]
+    prev_idx = prev_col["col_idx"]
     for row in all_rows[best_idx + 1:]:
         sl = row[0] if row else None
         if not sl or str(sl).strip() == "": continue
@@ -268,9 +280,23 @@ def process_project_sheet(proj_sheet, current_date):
         except: continue
         kw = row[1] if len(row) > 1 else None
         if not kw or str(kw).strip() == "": continue
+
+        # Per-row inclusion rule:
+        # A keyword is part of THIS reporting period only if its row has an
+        # entry in the current-month date column. Blank = team did not track
+        # this keyword for this period → skip.
+        # NA / dashes / numbers all count as conscious entries → include.
+        curr_cell = row[curr_idx] if curr_idx < len(row) else None
+        if is_blank_cell(curr_cell):
+            continue
+
+        # Previous-month cell may be blank — that's fine. parse_rank() will
+        # turn a blank into "NA", so the keyword registers as Rank Up if the
+        # current cell has a number. We do NOT skip on blank previous.
+        prev_cell = row[prev_idx] if prev_idx < len(row) else None
         keywords.append({
-            "prev": row[prev_col["col_idx"]] if prev_col["col_idx"] < len(row) else None,
-            "curr": row[curr_col["col_idx"]] if curr_col["col_idx"] < len(row) else None,
+            "prev": prev_cell,
+            "curr": curr_cell,
         })
     if not keywords: return {"error": "No keyword rows"}
     m = calculate_metrics(keywords)
